@@ -1,0 +1,29 @@
+description: |
+  The parameters of the Bluetooth link to the computer, per BLE profile, and
+  the pointer report interval that goes with them. See README.md.
+
+compatible: "zmk,behavior-ble-host-link"
+
+include: two_param.yaml
+
+properties:
+  ble-host-interval-presets:
+    type: array
+    required: true
+    description: |
+      Host intervals BLE_HOST_INTERVAL_NEXT / _PREV step through, in this
+      order. Bluetooth units of 1.25 ms (6 = 7.5 ms, 12 = 15 ms);
+      BLE_HOST_INTERVAL_RANGE(min, max) offers a range; BLE_HOST_INTERVAL_AUTO
+      hands the interval to the automatic search.
+  ble-host-latency-presets:
+    type: array
+    required: true
+    description: |
+      Host latencies BLE_HOST_LATENCY_NEXT / _PREV step through, in
+      connection events; BLE_HOST_LATENCY_AUTO hands the latency back.
+  ball-ble-report-presets:
+    type: array
+    required: true
+    description: |
+      Pointer report intervals over BLE BALL_BLE_REPORT_NEXT / _PREV step
+      through, in ms; BALL_BLE_REPORT_AUTO derives it from the host interval.

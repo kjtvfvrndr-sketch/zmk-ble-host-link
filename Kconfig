@@ -1,0 +1,298 @@
+# zmk-ble-host-link: the parameters of the Bluetooth link to the computer (the
+# host link), found automatically for every host and adjustable by hand per
+# BLE profile, plus the pointer report interval that goes with them.
+#
+# Units follow Bluetooth and ZMK: intervals in 1.25 ms steps (6 = 7.5 ms,
+# 12 = 15 ms), latency in connection events, times in ms.
+
+DT_COMPAT_ZMK_BEHAVIOR_BLE_HOST_LINK := zmk,behavior-ble-host-link
+
+config ZMK_BLE_HOST_LINK
+    bool "Find and hold the host link's parameters per BLE profile"
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_BLE_HOST_LINK))
+    depends on ZMK_BLE
+    depends on !ZMK_SPLIT || ZMK_SPLIT_ROLE_CENTRAL
+    depends on SETTINGS
+    help
+      Turns itself on when the keymap (or a ZMK Studio build) has the
+      &ble_host_link behavior.
+
+      For every host it searches for the fastest interval up to
+      SLOWEST_INTERVAL the host accepts, then the latency that keeps the
+      keyboard's idle listening near IDLE_LISTEN_PERIOD_MS, remembers the
+      result, and asks for it on every later connection. Each parameter
+      can be fixed by hand per BLE profile instead.
+
+      While on, this module sends every connection parameter request of the
+      host link itself, and BT_GAP_AUTO_UPDATE_CONN_PARAMS goes off.
+
+if ZMK_BLE_HOST_LINK
+
+config ZMK_BLE_HOST_LINK_FASTEST_INTERVAL
+    int "Fastest host link interval the search asks for (1.25 ms units)"
+    range 6 3200
+    default 6
+    help
+      6 = 7.5 ms, the lowest the Bluetooth core spec allows.
+
+config ZMK_BLE_HOST_LINK_SLOWEST_INTERVAL
+    int "Slowest host link interval the search counts as a success (1.25 ms units)"
+    range ZMK_BLE_HOST_LINK_FASTEST_INTERVAL 3200
+    default 12
+    help
+      Every search starts by securing exactly this interval, and only then
+      asks for anything faster. 12 = 15 ms suits a pointer, and is also the
+      one interval every Apple host accepts at a non-zero latency. A board
+      without a pointer is fine with up to 24 = 30 ms.
+
+config ZMK_BLE_HOST_LINK_LATENCY_WHILE_SEARCHING_INTERVAL
+    int "Peripheral latency the interval is searched at (connection events)"
+    range 0 30
+    default 30
+    help
+      Every request of the interval search carries this latency, so that a
+      refusal can only mean the interval. 30 is the most Apple's guidelines
+      allow.
+
+config ZMK_BLE_HOST_LINK_IDLE_LISTEN_PERIOD_MS
+    int "Idle listening period the latency search aims for (ms)"
+    range 8 2000
+    default 465
+    help
+      With nothing to send, the keyboard listens once every
+      interval * (latency + 1). The latency search picks the latency that
+      keeps that near this value, at whatever interval the host gave: 465 ms
+      is 15 ms at latency 30, so a faster interval does not cost more while
+      idle -- 7.5 ms gets latency 61, 11.25 ms latency 40. Keys and pointer
+      reports are not delayed by it: pending data cancels the latency.
+
+config ZMK_BLE_HOST_LINK_SUPERVISION_TIMEOUT_MS
+    int "Supervision timeout of every request (ms, a multiple of 10)"
+    range 2000 6000
+    default 4100
+    help
+      2..6 s is what Apple's guidelines allow. Not 4000: that is ZMK
+      Studio's (BT_PERIPHERAL_PREF_TIMEOUT), and ZMK Studio is recognised by
+      its parameters -- the build fails if the two are within 10 ms.
+
+config ZMK_BLE_HOST_LINK_HOST_ANSWER_TIMEOUT_MS
+    int "How long to wait for the host to answer a request (ms)"
+    default 4000
+    help
+      A refusal over L2CAP reaches Zephyr, but Zephyr only logs it and
+      tells the application nothing, so silence this long counts as a
+      refusal (taken back if the host answers late, during a search). The
+      wait grows by two of the link's idle listening periods
+      (interval * (latency + 1)): on a slow link the keyboard hears the
+      host's answer only that often. In the first seconds of a connection
+      (BT_CONN_PARAM_UPDATE_TIMEOUT) the request is not sent at all yet:
+      the module waits that out itself, so that a failure to send shows.
+
+config ZMK_BLE_HOST_LINK_PAUSE_BETWEEN_PROBES_MS
+    int "Pause between two requests of a search (ms)"
+    default 5000
+    help
+      The same spacing Zephyr itself keeps between repeated requests
+      (BT_CONN_PARAM_RETRY_TIMEOUT).
+
+config ZMK_BLE_HOST_LINK_INPUT_QUIET_BEFORE_PROBE_MS
+    int "No key or pointer input for this long before a search request (ms)"
+    default 1000
+    help
+      Each change of parameters can show as a brief stall of the cursor, so
+      a search waits for a pause in use before every request.
+
+config ZMK_BLE_HOST_LINK_MAX_PROBES_PER_CONNECTION
+    int "Requests one search may send"
+    range 1 32
+    default 12
+    help
+      Requests that put the link back after a slow pick are not counted:
+      the link is never left off the best parameters found.
+
+config ZMK_BLE_HOST_LINK_STORED_RESULT_RETRY_MS
+    int "Wait before asking once more for a stored result the host refused (ms)"
+    default 30000
+    help
+      A host may refuse a request once for a passing reason -- macOS busy
+      with other Bluetooth devices, say. A stored search result it refuses
+      is asked for again after this long. Refused twice, the link gets the
+      fallback result, or the secure request (SLOWEST_INTERVAL), and the
+      connection counts as refused (kept in flash, across deep sleep). From
+      2 such connections in a row the host is searched again until one such
+      search ends: no worse -- the new stored result; slower -- the
+      fallback. At 5, the fallback replaces the stored result (the host has
+      changed), or, if searching again found nothing, the stored result is
+      dropped and the host keeps its own parameters.
+
+config ZMK_BLE_HOST_LINK_RESTORE_AFTER_FOREIGN_CHANGE_MS
+    int "Wait before undoing a change of the link made by someone else (ms)"
+    default 5000
+    help
+      ZMK Studio, or the host itself, may change the link's parameters. The
+      module asks for its own again this long after such a change, once
+      input has paused too. ZMK Studio's own parameters are left alone while
+      it is open, and replaced when it closes.
+
+config ZMK_BLE_HOST_LINK_FOREIGN_CHANGE_GIVE_UP_MS
+    int "A host that changes the link again this soon is left alone (ms)"
+    default 60000
+    help
+      A host that changes the link back within this time of the module
+      undoing its change means it: the module leaves the link as the host
+      wants it until the next connection.
+
+config ZMK_BLE_HOST_LINK_DROP_COUNTS_IF_HOST_RETURNS_WITHIN_MS
+    int "A link dropped after a search request counts if the host returns this soon (ms)"
+    default 30000
+    help
+      A host that drops the link right after a search request may have
+      disliked the request -- or gone to sleep, or had Bluetooth switched
+      off. A host that disliked it is awake and comes straight back; one
+      that slept does not. So such a drop counts only if the same host
+      connects again within this time (a drop with reason 0x3B --
+      the parameters themselves -- counts at once). A counted drop makes the
+      search skip that kind of request on the host from then on; two
+      counted drops in a row stop the search there until BLE_HOST_LINK_AUTO.
+
+config ZMK_BLE_HOST_LINK_APPLY_AFTER_LAST_KEY_MS
+    int "Delay between the last change by key and the request to the host (ms)"
+    default 500
+    help
+      A burst of presses becomes one request for the final value.
+
+config ZMK_BLE_HOST_LINK_SLOWEST_SETTABLE_INTERVAL
+    int "Slowest interval a key or ZMK Studio may set (1.25 ms units)"
+    range 6 3200
+    default 24
+    help
+      24 = 30 ms: slower is of no use to a keyboard, let alone a pointer.
+
+config ZMK_BLE_HOST_LINK_SLOWEST_SETTABLE_BALL_REPORT_MS
+    int "Slowest pointer report interval a key or ZMK Studio may set (ms)"
+    range 4 254
+    default 16
+    help
+      16 ms = 62.5 reports a second; slower makes the cursor jerk.
+
+config ZMK_BLE_HOST_LINK_TYPED_REPORT_KEY_HOLD_MS
+    int "How long each key of a typed report is held, and released (ms)"
+    range 1 100
+    default 10
+    help
+      Over Bluetooth at least one host link interval, so that the reports
+      do not pile up past ZMK's queue on a slow link.
+
+config ZMK_BLE_HOST_LINK_KEEP_ONLY_ACTIVE_HOST_CONNECTED
+    bool "Keep only the active profile's host connected"
+    default y
+    help
+      ZMK keeps every host that connects, active profile or not: up to
+      ZMK_BLE_PROFILE_COUNT links, each waking the radio on its own
+      schedule and taking air time from the active host and the split link,
+      while only the active one gets any input.
+
+      With this on, as with most multi-host mice and keyboards:
+        - once the active profile's host is connected, every other
+          profile's host is disconnected (ZMK stops advertising then, so
+          they do not come back);
+        - while the active profile's host is away -- a profile just
+          selected whose host is not there yet, say -- ZMK advertises to
+          all, and the other profiles' hosts stay connected -- sending them
+          away would only make them come back again and again -- but are
+          asked for the background parameters below, the host of the
+          profile just left too.
+      Switching to a profile whose host was disconnected takes a
+      reconnect, usually 1-3 s.
+
+if ZMK_BLE_HOST_LINK_KEEP_ONLY_ACTIVE_HOST_CONNECTED
+
+config ZMK_BLE_HOST_LINK_BACKGROUND_INTERVAL_MIN
+    int "Background link interval, minimum (1.25 ms units)"
+    range 6 3200
+    default 48
+    help
+      The parameters asked of another profile's host kept connected while
+      the active one is away: as slow as Apple's rules allow, so that it
+      wakes the radio about once in 2 s. 48-60 = 60-75 ms (Apple wants a
+      range 15 ms wide), latency 25, timeout 6 s: 75 ms * 26 = 1.95 s.
+
+config ZMK_BLE_HOST_LINK_BACKGROUND_INTERVAL_MAX
+    int "Background link interval, maximum (1.25 ms units)"
+    range ZMK_BLE_HOST_LINK_BACKGROUND_INTERVAL_MIN 3200
+    default 60
+
+config ZMK_BLE_HOST_LINK_BACKGROUND_LATENCY
+    int "Background link latency (connection events)"
+    range 0 499
+    default 25
+
+config ZMK_BLE_HOST_LINK_BACKGROUND_SUPERVISION_TIMEOUT_MS
+    int "Background link supervision timeout (ms, a multiple of 10)"
+    range 100 32000
+    default 6000
+
+endif # ZMK_BLE_HOST_LINK_KEEP_ONLY_ACTIVE_HOST_CONNECTED
+
+config ZMK_BLE_HOST_LINK_LED_FEEDBACK
+    bool "Count values and host answers out on the RGB LED widget"
+    depends on RGBLED_WIDGET_BLINK_API
+    default y
+
+if ZMK_BLE_HOST_LINK_LED_FEEDBACK
+
+config ZMK_BLE_HOST_LINK_LED_RGB_COUNT_INTERVAL
+    hex "Colour counting out the host interval preset (0xRRGGBB)"
+    default 0x8000FF
+
+config ZMK_BLE_HOST_LINK_LED_RGB_COUNT_LATENCY
+    hex "Colour counting out the host latency preset (0xRRGGBB)"
+    default 0xFF8000
+
+config ZMK_BLE_HOST_LINK_LED_RGB_COUNT_BALL_REPORT
+    hex "Colour counting out the pointer report preset (0xRRGGBB)"
+    default 0xFFFF00
+
+config ZMK_BLE_HOST_LINK_LED_RGB_HOST_ACCEPTED
+    hex "The link runs what was asked for (0xRRGGBB)"
+    default 0x0000FF
+
+config ZMK_BLE_HOST_LINK_LED_RGB_HOST_REFUSED
+    hex "The host refused, ignored, or picked something else (0xRRGGBB)"
+    default 0xFF0000
+
+config ZMK_BLE_HOST_LINK_LED_RGB_NOT_CONNECTED_OR_SEARCHING
+    hex "Profile not connected, or a search started (0xRRGGBB)"
+    default 0x00FFFF
+
+config ZMK_BLE_HOST_LINK_LED_BLINK_ON_MS
+    int "Length of one counting blink (ms)"
+    range 20 5000
+    default 150
+    help
+      A count of zero shows as one blink four times this long.
+
+config ZMK_BLE_HOST_LINK_LED_BLINK_OFF_MS
+    int "Gap after each blink (ms)"
+    range 20 5000
+    default 200
+
+endif # ZMK_BLE_HOST_LINK_LED_FEEDBACK
+
+module = ZMK_BLE_HOST_LINK
+module-str = zmk-ble-host-link
+source "${ZEPHYR_BASE}/subsys/logging/Kconfig.template.log_config"
+
+endif # ZMK_BLE_HOST_LINK
+
+config ZMK_BEHAVIOR_BLE_HOST_LINK
+    bool
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_BLE_HOST_LINK))
+    depends on ZMK_BLE_HOST_LINK
+
+# This module sends every request of the host link. Zephyr's own automatic
+# request would go out as well, five seconds after every connection, with the
+# BT_PERIPHERAL_PREF_* values -- and replace whatever this module asked for
+# whenever the host already met it at connect time.
+config BT_GAP_AUTO_UPDATE_CONN_PARAMS
+    default n if ZMK_BLE_HOST_LINK

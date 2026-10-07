@@ -1,0 +1,27 @@
+/*
+ * SPDX-License-Identifier: MIT
+ */
+
+#include <dt-bindings/zmk/behaviors.h>
+#include <dt-bindings/zmk/ble_host_link.h>
+
+/ {
+    behaviors {
+        /* Like ZMK's own behaviors: dropped when unreferenced, kept for
+           ZMK Studio builds (ZMK_BEHAVIORS_KEEP_ALL). */
+#if ZMK_BEHAVIOR_OMIT(BLE_HOST_LINK)
+        /omit-if-no-ref/
+#endif
+        ble_host_link: ble_host_link {
+            compatible = "zmk,behavior-ble-host-link";
+            #binding-cells = <2>;
+            display-name = "BLE Host Link";
+            /* 1.25 ms units: auto, 7.5, 11.25, 15 ms */
+            ble-host-interval-presets = <BLE_HOST_INTERVAL_AUTO 6 9 12>;
+            /* connection events */
+            ble-host-latency-presets = <BLE_HOST_LATENCY_AUTO 0 30 60>;
+            /* ms */
+            ball-ble-report-presets = <BALL_BLE_REPORT_AUTO 4 8 12 16>;
+        };
+    };
+};
