@@ -11,19 +11,20 @@ properties:
     type: array
     required: true
     description: |
-      Host intervals BLE_HOST_INTERVAL_NEXT / _PREV step through, in this
-      order. Bluetooth units of 1.25 ms (6 = 7.5 ms, 12 = 15 ms);
-      BLE_HOST_INTERVAL_RANGE(min, max) offers a range; BLE_HOST_INTERVAL_AUTO
-      hands the interval to the automatic search.
+      Host intervals BLE_HOST_INTERVAL_NEXT / _PREV step through: from the
+      interval in effect to the next larger / smaller one, round the list.
+      Exact intervals in Bluetooth units of 1.25 ms (6 = 7.5 ms, 12 = 15 ms);
+      no AUTO here (BLE_HOST_INTERVAL_SET BLE_HOST_INTERVAL_AUTO hands the
+      interval back).
   ble-host-latency-presets:
     type: array
     required: true
     description: |
-      Host latencies BLE_HOST_LATENCY_NEXT / _PREV step through, in
-      connection events; BLE_HOST_LATENCY_AUTO hands the latency back.
+      Host latencies BLE_HOST_LATENCY_NEXT / _PREV step through the same
+      way, in connection events; no AUTO here.
   ball-ble-report-presets:
     type: array
     required: true
     description: |
       Pointer report intervals over BLE BALL_BLE_REPORT_NEXT / _PREV step
-      through, in ms; BALL_BLE_REPORT_AUTO derives it from the host interval.
+      through the same way, in ms; no AUTO here.

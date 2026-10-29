@@ -16,12 +16,12 @@
             compatible = "zmk,behavior-ble-host-link";
             #binding-cells = <2>;
             display-name = "BLE Host Link";
-            /* 1.25 ms units: auto, 7.5, 11.25, 15 ms */
-            ble-host-interval-presets = <BLE_HOST_INTERVAL_AUTO 6 9 12>;
+            /* 1.25 ms units: 7.5, 11.25, 15 ms */
+            ble-host-interval-presets = <6 9 12>;
             /* connection events */
-            ble-host-latency-presets = <BLE_HOST_LATENCY_AUTO 0 30 60>;
+            ble-host-latency-presets = <0 30 60>;
             /* ms */
-            ball-ble-report-presets = <BALL_BLE_REPORT_AUTO 4 8 12 16>;
+            ball-ble-report-presets = <4 8 12 16>;
         };
     };
 };

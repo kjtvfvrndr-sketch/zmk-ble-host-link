@@ -4,6 +4,11 @@
  * &ble_host_link: step through or set the host link parameters of the active
  * BLE profile and the pointer report interval, hand them back to the
  * automatic choice, and show or type what is in effect.
+ *
+ * NEXT / PREV step from the value in effect -- fixed by hand, or chosen
+ * automatically -- to the next larger / smaller preset, round the list: after
+ * the largest comes the smallest. AUTO is not on the list: the ..._AUTOMATIC
+ * commands (or SET ... AUTO) and BLE_HOST_LINK_AUTO hand a value back.
  */
 
 #define DT_DRV_COMPAT zmk_behavior_ble_host_link
@@ -33,12 +38,6 @@ struct behavior_ble_host_link_config {
     struct presets ball_report;
 };
 
-/* An interval preset or _SET value: min | max << 16, max 0 meaning min. */
-static uint16_t interval_min_of(uint32_t v) { return (uint16_t)(v & 0xFFFF); }
-static uint16_t interval_max_of(uint32_t v) {
-    return (v >> 16) ? (uint16_t)(v >> 16) : (uint16_t)(v & 0xFFFF);
-}
-
 #if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
 
 static const struct behavior_parameter_value_metadata no_arg_values[] = {
@@ -60,6 +59,15 @@ static const struct behavior_parameter_value_metadata no_arg_values[] = {
     {.display_name = "Ball BLE report: previous",
      .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
      .value = BALL_BLE_REPORT_PREV_CMD},
+    {.display_name = "Host interval: automatic",
+     .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
+     .value = BLE_HOST_INTERVAL_AUTOMATIC_CMD},
+    {.display_name = "Host latency: automatic",
+     .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
+     .value = BLE_HOST_LATENCY_AUTOMATIC_CMD},
+    {.display_name = "Ball BLE report: automatic",
+     .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
+     .value = BALL_BLE_REPORT_AUTOMATIC_CMD},
     {.display_name = "All automatic, search again",
      .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
      .value = BLE_HOST_LINK_AUTO_CMD},
@@ -84,10 +92,9 @@ static const struct behavior_parameter_value_metadata interval_set_cmd[] = {
      .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
      .value = BLE_HOST_INTERVAL_SET_CMD},
 };
+/* One range per "set": ZMK Studio edits a range or picks from values, not
+   both -- "automatic" is a command of its own above. */
 static const struct behavior_parameter_value_metadata interval_set_value[] = {
-    {.display_name = "Automatic",
-     .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
-     .value = BLE_HOST_INTERVAL_AUTO},
     {.display_name = "Interval (1.25 ms units)",
      .type = BEHAVIOR_PARAMETER_VALUE_TYPE_RANGE,
      .range = {.min = 6, .max = CONFIG_ZMK_BLE_HOST_LINK_SLOWEST_SETTABLE_INTERVAL}},
@@ -108,9 +115,6 @@ static const struct behavior_parameter_value_metadata latency_set_value[] = {
     {.display_name = "Latency (connection events)",
      .type = BEHAVIOR_PARAMETER_VALUE_TYPE_RANGE,
      .range = {.min = 0, .max = 499}},
-    {.display_name = "Automatic",
-     .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
-     .value = BLE_HOST_LATENCY_AUTO},
 };
 static const struct behavior_parameter_metadata_set latency_set = {
     .param1_values = latency_set_cmd,
@@ -128,9 +132,6 @@ static const struct behavior_parameter_value_metadata ball_set_value[] = {
     {.display_name = "Report interval (ms, 0 = every frame)",
      .type = BEHAVIOR_PARAMETER_VALUE_TYPE_RANGE,
      .range = {.min = 0, .max = CONFIG_ZMK_BLE_HOST_LINK_SLOWEST_SETTABLE_BALL_REPORT_MS}},
-    {.display_name = "Automatic",
-     .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
-     .value = BALL_BLE_REPORT_AUTO},
 };
 static const struct behavior_parameter_metadata_set ball_set = {
     .param1_values = ball_set_cmd,
@@ -153,78 +154,70 @@ static const struct behavior_parameter_metadata metadata = {
 
 #endif /* IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA) */
 
-static int find_interval(const struct presets *p, uint16_t min, uint16_t max) {
+/* The next larger (up) or smaller preset than `current`, round the list. */
+static uint32_t step(const struct presets *p, uint32_t current, bool up) {
+    bool found = false;
+    uint32_t best = 0;
+
     for (size_t i = 0; i < p->count; i++) {
-        if (interval_min_of(p->values[i]) == min && interval_max_of(p->values[i]) == max) {
-            return (int)i;
+        const uint32_t v = p->values[i];
+        const bool beyond = up ? v > current : v < current;
+        const bool nearer = !found || (up ? v < best : v > best);
+
+        if (beyond && nearer) {
+            best = v;
+            found = true;
         }
     }
-    return -1;
-}
-
-static int find_value(const struct presets *p, uint32_t value) {
-    for (size_t i = 0; i < p->count; i++) {
-        if (p->values[i] == value) {
-            return (int)i;
+    if (found) {
+        return best;
+    }
+    /* Past the end: round to the other end. */
+    best = p->values[0];
+    for (size_t i = 1; i < p->count; i++) {
+        if (up ? p->values[i] < best : p->values[i] > best) {
+            best = p->values[i];
         }
     }
-    return -1;
+    return best;
 }
 
-/* Wrapping step from position i; a value not in the list steps onto its ends. */
-static uint32_t step(const struct presets *p, int i, bool forward) {
-    if (i < 0) {
-        return p->values[forward ? 0 : p->count - 1];
+/* The value in effect: fixed by hand -- as set, not as asked for after the
+   spec's limits -- or what is asked for (in use, for the ball). */
+static uint32_t interval_in_effect(const struct zmk_ble_host_link_status *s) {
+    return s->interval_pinned ? s->pinned_interval : s->asked_interval;
+}
+
+static uint32_t latency_in_effect(const struct zmk_ble_host_link_status *s) {
+    return s->latency_pinned ? s->pinned_latency : s->asked_latency;
+}
+
+static uint32_t ball_in_effect(const struct zmk_ble_host_link_status *s) {
+    return s->ball_report_pinned ? s->pinned_ball_report_ms : s->ball_report_ms;
+}
+
+static void set_interval(uint32_t value) {
+    if (value > 0xFFFF) {
+        LOG_ERR("Host interval %u is out of range: one exact interval, in 1.25 ms units", value);
+        return;
     }
-    return p->values[forward ? ((size_t)i + 1) % p->count : ((size_t)i + p->count - 1) % p->count];
+    zmk_ble_host_link_set_interval((uint16_t)value);
 }
 
-/* Position of the value fixed by hand -- as set, not as asked for after the
-   spec's limits -- or of the AUTO marker. */
-static int interval_position(const struct presets *p, const struct zmk_ble_host_link_status *s) {
-    return s->interval_pinned
-               ? find_interval(p, s->pinned_interval_min, s->pinned_interval_max)
-               : find_value(p, BLE_HOST_INTERVAL_AUTO);
-}
-
-static int latency_position(const struct presets *p, const struct zmk_ble_host_link_status *s) {
-    return find_value(p, s->latency_pinned ? s->pinned_latency : BLE_HOST_LATENCY_AUTO);
-}
-
-static int ball_position(const struct presets *p, const struct zmk_ble_host_link_status *s) {
-    return find_value(p, s->ball_report_pinned ? s->pinned_ball_report_ms : BALL_BLE_REPORT_AUTO);
-}
-
-static void set_interval(const struct presets *p, uint32_t value) {
-    const uint16_t min = interval_min_of(value);
-    const uint16_t max = interval_max_of(value);
-
-    if (zmk_ble_host_link_set_interval(min, max) == 0) {
-        zmk_ble_host_link_count_out(ZMK_BLE_HOST_LINK_COUNT_INTERVAL,
-                                    (uint8_t)(find_interval(p, min, max) + 1));
-    }
-}
-
-static void set_latency(const struct presets *p, uint32_t value) {
+static void set_latency(uint32_t value) {
     if (value > 0xFFFF) {
         LOG_ERR("Host latency %u is out of range", value);
         return;
     }
-    if (zmk_ble_host_link_set_latency((uint16_t)value) == 0) {
-        zmk_ble_host_link_count_out(ZMK_BLE_HOST_LINK_COUNT_LATENCY,
-                                    (uint8_t)(find_value(p, value) + 1));
-    }
+    zmk_ble_host_link_set_latency((uint16_t)value);
 }
 
-static void set_ball(const struct presets *p, uint32_t value) {
+static void set_ball(uint32_t value) {
     if (value > BALL_BLE_REPORT_AUTO) {
         LOG_ERR("Ball report interval %u ms is out of range", value);
         return;
     }
-    if (zmk_ble_host_link_set_ball_report((uint8_t)value) == 0) {
-        zmk_ble_host_link_count_out(ZMK_BLE_HOST_LINK_COUNT_BALL_REPORT,
-                                    (uint8_t)(find_value(p, value) + 1));
-    }
+    zmk_ble_host_link_set_ball_report((uint8_t)value);
 }
 
 static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
@@ -239,36 +232,42 @@ static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
 
     switch (cmd) {
     case BLE_HOST_INTERVAL_SET_CMD:
-        set_interval(&cfg->interval, value);
+        set_interval(value);
         break;
     case BLE_HOST_LATENCY_SET_CMD:
-        set_latency(&cfg->latency, value);
+        set_latency(value);
         break;
     case BALL_BLE_REPORT_SET_CMD:
-        set_ball(&cfg->ball_report, value);
+        set_ball(value);
+        break;
+    case BLE_HOST_INTERVAL_AUTOMATIC_CMD:
+        set_interval(BLE_HOST_INTERVAL_AUTO);
+        break;
+    case BLE_HOST_LATENCY_AUTOMATIC_CMD:
+        set_latency(BLE_HOST_LATENCY_AUTO);
+        break;
+    case BALL_BLE_REPORT_AUTOMATIC_CMD:
+        set_ball(BALL_BLE_REPORT_AUTO);
         break;
 
     case BLE_HOST_INTERVAL_NEXT_CMD:
     case BLE_HOST_INTERVAL_PREV_CMD:
         if (zmk_ble_host_link_get_status(&s) == 0) {
-            set_interval(&cfg->interval,
-                         step(&cfg->interval, interval_position(&cfg->interval, &s),
+            set_interval(step(&cfg->interval, interval_in_effect(&s),
                               cmd == BLE_HOST_INTERVAL_NEXT_CMD));
         }
         break;
     case BLE_HOST_LATENCY_NEXT_CMD:
     case BLE_HOST_LATENCY_PREV_CMD:
         if (zmk_ble_host_link_get_status(&s) == 0) {
-            set_latency(&cfg->latency, step(&cfg->latency, latency_position(&cfg->latency, &s),
-                                            cmd == BLE_HOST_LATENCY_NEXT_CMD));
+            set_latency(
+                step(&cfg->latency, latency_in_effect(&s), cmd == BLE_HOST_LATENCY_NEXT_CMD));
         }
         break;
     case BALL_BLE_REPORT_NEXT_CMD:
     case BALL_BLE_REPORT_PREV_CMD:
         if (zmk_ble_host_link_get_status(&s) == 0) {
-            set_ball(&cfg->ball_report,
-                     step(&cfg->ball_report, ball_position(&cfg->ball_report, &s),
-                          cmd == BALL_BLE_REPORT_NEXT_CMD));
+            set_ball(step(&cfg->ball_report, ball_in_effect(&s), cmd == BALL_BLE_REPORT_NEXT_CMD));
         }
         break;
 
@@ -279,17 +278,7 @@ static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
         zmk_ble_host_link_request_again();
         break;
     case BLE_HOST_LINK_SHOW_CMD:
-        if (zmk_ble_host_link_get_status(&s) == 0) {
-            /* The verdict first: if the LED queue overflows, the counts are
-               what is lost, not the answer. */
-            zmk_ble_host_link_show();
-            zmk_ble_host_link_count_out(ZMK_BLE_HOST_LINK_COUNT_INTERVAL,
-                                        (uint8_t)(interval_position(&cfg->interval, &s) + 1));
-            zmk_ble_host_link_count_out(ZMK_BLE_HOST_LINK_COUNT_LATENCY,
-                                        (uint8_t)(latency_position(&cfg->latency, &s) + 1));
-            zmk_ble_host_link_count_out(ZMK_BLE_HOST_LINK_COUNT_BALL_REPORT,
-                                        (uint8_t)(ball_position(&cfg->ball_report, &s) + 1));
-        }
+        zmk_ble_host_link_show();
         break;
     case BLE_HOST_LINK_TYPE_REPORT_CMD:
         zmk_ble_host_link_type_report();
@@ -324,54 +313,28 @@ static const struct behavior_driver_api behavior_ble_host_link_driver_api = {
 #endif
 };
 
-/* Preset checks at build time. */
-
-/* SHOW queues a verdict (up to 2 blinks) and one blink per preset position,
-   up to the length of each list, into the LED widget's queue. */
-#if IS_ENABLED(CONFIG_ZMK_BLE_HOST_LINK_LED_FEEDBACK)
-#include <zmk_rgbled_widget/widget.h>
-#define LED_INDICATIONS_SHOW_MAY_QUEUE RGBLED_WIDGET_INDICATION_QUEUE_LENGTH
-#else
-#define LED_INDICATIONS_SHOW_MAY_QUEUE 0
-#endif
-#define SHOW_VERDICT_BLINKS 2
-#define PRESET_MIN(v) ((v)&0xFFFF)
-#define PRESET_MAX(v) (((v) >> 16) ? ((v) >> 16) : ((v)&0xFFFF))
+/* Preset checks at build time: exact values only, AUTO is not a preset. */
 #define INTERVAL_PRESET_OK(node_id, prop, idx)                                                     \
-    &&((DT_PROP_BY_IDX(node_id, prop, idx) == BLE_HOST_INTERVAL_AUTO) ||                           \
-       ((PRESET_MIN(DT_PROP_BY_IDX(node_id, prop, idx)) >= 6) &&                                   \
-        (PRESET_MAX(DT_PROP_BY_IDX(node_id, prop, idx)) >=                                         \
-         PRESET_MIN(DT_PROP_BY_IDX(node_id, prop, idx))) &&                                        \
-        (PRESET_MAX(DT_PROP_BY_IDX(node_id, prop, idx)) <=                                         \
-         CONFIG_ZMK_BLE_HOST_LINK_SLOWEST_SETTABLE_INTERVAL)))
-#define LATENCY_PRESET_OK(node_id, prop, idx)                                                      \
-    &&((DT_PROP_BY_IDX(node_id, prop, idx) == BLE_HOST_LATENCY_AUTO) ||                            \
-       (DT_PROP_BY_IDX(node_id, prop, idx) <= 499))
+    &&(DT_PROP_BY_IDX(node_id, prop, idx) >= 6) &&                                                 \
+        (DT_PROP_BY_IDX(node_id, prop, idx) <= CONFIG_ZMK_BLE_HOST_LINK_SLOWEST_SETTABLE_INTERVAL)
+#define LATENCY_PRESET_OK(node_id, prop, idx) &&(DT_PROP_BY_IDX(node_id, prop, idx) <= 499)
 #define BALL_PRESET_OK(node_id, prop, idx)                                                         \
-    &&((DT_PROP_BY_IDX(node_id, prop, idx) == BALL_BLE_REPORT_AUTO) ||                             \
-       (DT_PROP_BY_IDX(node_id, prop, idx) <=                                                      \
-        CONFIG_ZMK_BLE_HOST_LINK_SLOWEST_SETTABLE_BALL_REPORT_MS))
+    &&(DT_PROP_BY_IDX(node_id, prop, idx) <=                                                       \
+       CONFIG_ZMK_BLE_HOST_LINK_SLOWEST_SETTABLE_BALL_REPORT_MS)
 
 #define BLE_HOST_LINK_INST(n)                                                                      \
     BUILD_ASSERT(DT_INST_PROP_LEN(n, ble_host_interval_presets) > 0 &&                             \
                      DT_INST_PROP_LEN(n, ble_host_latency_presets) > 0 &&                          \
                      DT_INST_PROP_LEN(n, ball_ble_report_presets) > 0,                             \
                  "&ble_host_link needs at least one preset of each kind");                         \
-    BUILD_ASSERT(!IS_ENABLED(CONFIG_ZMK_BLE_HOST_LINK_LED_FEEDBACK) ||                             \
-                     DT_INST_PROP_LEN(n, ble_host_interval_presets) +                              \
-                             DT_INST_PROP_LEN(n, ble_host_latency_presets) +                       \
-                             DT_INST_PROP_LEN(n, ball_ble_report_presets) +                        \
-                             SHOW_VERDICT_BLINKS <=                                                \
-                         LED_INDICATIONS_SHOW_MAY_QUEUE,                                           \
-                 "&ble_host_link: too many presets for SHOW to count out on the LED");             \
     BUILD_ASSERT(1 DT_INST_FOREACH_PROP_ELEM(n, ble_host_interval_presets, INTERVAL_PRESET_OK),    \
-                 "ble-host-interval-presets: BLE_HOST_INTERVAL_AUTO, or 6 <= min <= max <= "       \
-                 "ZMK_BLE_HOST_LINK_SLOWEST_SETTABLE_INTERVAL (1.25 ms units)");                   \
+                 "ble-host-interval-presets: 6..ZMK_BLE_HOST_LINK_SLOWEST_SETTABLE_INTERVAL "       \
+                 "(1.25 ms units), no AUTO");                                                      \
     BUILD_ASSERT(1 DT_INST_FOREACH_PROP_ELEM(n, ble_host_latency_presets, LATENCY_PRESET_OK),      \
-                 "ble-host-latency-presets: BLE_HOST_LATENCY_AUTO, or 0..499");                    \
+                 "ble-host-latency-presets: 0..499, no AUTO");                                     \
     BUILD_ASSERT(1 DT_INST_FOREACH_PROP_ELEM(n, ball_ble_report_presets, BALL_PRESET_OK),          \
-                 "ball-ble-report-presets: BALL_BLE_REPORT_AUTO, or 0.."                           \
-                 "ZMK_BLE_HOST_LINK_SLOWEST_SETTABLE_BALL_REPORT_MS");                             \
+                 "ball-ble-report-presets: 0..ZMK_BLE_HOST_LINK_SLOWEST_SETTABLE_BALL_REPORT_MS, "  \
+                 "no AUTO");                                                                       \
     static const uint32_t ble_host_link_interval_##n[] =                                           \
         DT_INST_PROP(n, ble_host_interval_presets);                                                \
     static const uint32_t ble_host_link_latency_##n[] = DT_INST_PROP(n, ble_host_latency_presets); \

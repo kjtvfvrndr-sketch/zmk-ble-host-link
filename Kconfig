@@ -17,11 +17,12 @@ config ZMK_BLE_HOST_LINK
       Turns itself on when the keymap (or a ZMK Studio build) has the
       &ble_host_link behavior.
 
-      For every host it searches for the fastest interval up to
-      SLOWEST_INTERVAL the host accepts, then the latency that keeps the
-      keyboard's idle listening near IDLE_LISTEN_PERIOD_MS, remembers the
-      result, and asks for it on every later connection. Each parameter
-      can be fixed by hand per BLE profile instead.
+      For every host it searches for the fastest exact interval up to
+      SLOWEST_INTERVAL the host accepts -- the slowest first, then up the
+      ladder from FASTEST_INTERVAL in 1.25 ms steps -- then the latency that
+      keeps the keyboard's idle listening near IDLE_LISTEN_PERIOD_MS,
+      remembers the result, and asks for it on every later connection. Each
+      parameter can be fixed by hand per BLE profile instead.
 
       While on, this module sends every connection parameter request of the
       host link itself, and BT_GAP_AUTO_UPDATE_CONN_PARAMS goes off.
@@ -33,7 +34,8 @@ config ZMK_BLE_HOST_LINK_FASTEST_INTERVAL
     range 6 3200
     default 6
     help
-      6 = 7.5 ms, the lowest the Bluetooth core spec allows.
+      6 = 7.5 ms, the lowest the Bluetooth core spec allows. The ladder of
+      the search starts here.
 
 config ZMK_BLE_HOST_LINK_SLOWEST_INTERVAL
     int "Slowest host link interval the search counts as a success (1.25 ms units)"
@@ -41,8 +43,9 @@ config ZMK_BLE_HOST_LINK_SLOWEST_INTERVAL
     default 12
     help
       Every search starts by securing exactly this interval, and only then
-      asks for anything faster. 12 = 15 ms suits a pointer, and is also the
-      one interval every Apple host accepts at a non-zero latency. A board
+      asks for anything faster, one exact interval after the other from
+      FASTEST_INTERVAL up. 12 = 15 ms suits a pointer, and is also the one
+      interval every Apple host accepts at a non-zero latency. A board
       without a pointer is fine with up to 24 = 30 ms.
 
 config ZMK_BLE_HOST_LINK_LATENCY_WHILE_SEARCHING_INTERVAL
@@ -52,7 +55,7 @@ config ZMK_BLE_HOST_LINK_LATENCY_WHILE_SEARCHING_INTERVAL
     help
       Every request of the interval search carries this latency, so that a
       refusal can only mean the interval. 30 is the most Apple's guidelines
-      allow.
+      allow. A host that gives a lower latency than asked has not accepted.
 
 config ZMK_BLE_HOST_LINK_IDLE_LISTEN_PERIOD_MS
     int "Idle listening period the latency search aims for (ms)"
@@ -69,61 +72,83 @@ config ZMK_BLE_HOST_LINK_IDLE_LISTEN_PERIOD_MS
 config ZMK_BLE_HOST_LINK_SUPERVISION_TIMEOUT_MS
     int "Supervision timeout of every request (ms, a multiple of 10)"
     range 2000 6000
-    default 4100
+    default 6000
     help
-      2..6 s is what Apple's guidelines allow. Not 4000: that is ZMK
-      Studio's (BT_PERIPHERAL_PREF_TIMEOUT), and ZMK Studio is recognised by
-      its parameters -- the build fails if the two are within 10 ms.
+      2..6 s is what Apple's guidelines allow; the longest rides out a
+      host that goes quiet for a few seconds -- a MacBook with its lid
+      closed, say -- at the cost of noticing a host that really left 6 s
+      later. It must differ from ZMK Studio's (BT_PERIPHERAL_PREF_TIMEOUT,
+      4000 in ZMK): ZMK Studio is recognised by its parameters, and the
+      build fails if the two are within 10 ms.
+
+      The timeout must outlast two idle listening periods:
+      interval * (latency + 1) * 2 < timeout. A latency fixed by hand above
+      that is trimmed, and the log says so.
 
 config ZMK_BLE_HOST_LINK_HOST_ANSWER_TIMEOUT_MS
     int "How long to wait for the host to answer a request (ms)"
     default 4000
     help
-      A refusal over L2CAP reaches Zephyr, but Zephyr only logs it and
-      tells the application nothing, so silence this long counts as a
-      refusal (taken back if the host answers late, during a search). The
-      wait grows by two of the link's idle listening periods
-      (interval * (latency + 1)): on a slow link the keyboard hears the
-      host's answer only that often. In the first seconds of a connection
-      (BT_CONN_PARAM_UPDATE_TIMEOUT) the request is not sent at all yet:
-      the module waits that out itself, so that a failure to send shows.
+      A request is accepted when the link moves onto exactly what was
+      asked within this time; anything else is a refusal. A refusal over
+      L2CAP reaches Zephyr, but Zephyr only logs it, and over the Link
+      Layer it shows as an update to the old parameters -- as may another
+      update completing first -- so only the deadline decides. A link that
+      moves onto the request later, before anything else is asked, is taken
+      as a late acceptance. The wait grows by two of the link's idle
+      listening periods (interval * (latency + 1)): on a slow link the
+      keyboard hears the host's answer only that often.
 
-config ZMK_BLE_HOST_LINK_PAUSE_BETWEEN_PROBES_MS
-    int "Pause between two requests of a search (ms)"
+      One request at a time: the next one -- a key's, a search's -- goes
+      out only once the last is answered or this time has passed. In the
+      first seconds of a connection (BT_CONN_PARAM_UPDATE_TIMEOUT) nothing
+      is sent yet: the module waits that out itself, so that a failure to
+      send shows.
+
+config ZMK_BLE_HOST_LINK_PAUSE_BETWEEN_SEARCH_REQUESTS_MS
+    int "Pause after the answer to a search request before the next (ms)"
     default 5000
     help
       The same spacing Zephyr itself keeps between repeated requests
-      (BT_CONN_PARAM_RETRY_TIMEOUT).
+      (BT_CONN_PARAM_RETRY_TIMEOUT), and time for a late answer. An
+      accepted request also gets its whole drop window (the supervision
+      timeout and 2 s) before the next goes out.
 
-config ZMK_BLE_HOST_LINK_INPUT_QUIET_BEFORE_PROBE_MS
+config ZMK_BLE_HOST_LINK_INPUT_QUIET_BEFORE_SEARCH_REQUEST_MS
     int "No key or pointer input for this long before a search request (ms)"
     default 1000
     help
       Each change of parameters can show as a brief stall of the cursor, so
       a search waits for a pause in use before every request.
 
-config ZMK_BLE_HOST_LINK_MAX_PROBES_PER_CONNECTION
-    int "Requests one search may send"
-    range 1 32
-    default 12
-    help
-      Requests that put the link back after a slow pick are not counted:
-      the link is never left off the best parameters found.
-
-config ZMK_BLE_HOST_LINK_STORED_RESULT_RETRY_MS
-    int "Wait before asking once more for a stored result the host refused (ms)"
+config ZMK_BLE_HOST_LINK_SEARCH_WAITS_AFTER_PAIRING_MS
+    int "After a pairing, the search starts this much later (ms)"
     default 30000
     help
+      A host just paired is busy with the new device for a while -- Windows
+      installs its drivers -- and may refuse a request it takes a minute
+      later, so that the search keeps a slower result; a request in the
+      middle of that set-up may even make Windows drop the link and the
+      pairing. The whole search, its first (secure) request too, starts
+      this long after the pairing. 0: no wait.
+
+config ZMK_BLE_HOST_LINK_RETRY_REFUSED_REQUEST_AFTER_MS
+    int "Wait before asking once more for a refused stored result or fixed value (ms)"
+    default 5000
+    help
       A host may refuse a request once for a passing reason -- macOS busy
-      with other Bluetooth devices, say. A stored search result it refuses
-      is asked for again after this long. Refused twice, the link gets the
-      fallback result, or the secure request (SLOWEST_INTERVAL), and the
-      connection counts as refused (kept in flash, across deep sleep). From
-      2 such connections in a row the host is searched again until one such
-      search ends: no worse -- the new stored result; slower -- the
-      fallback. At 5, the fallback replaces the stored result (the host has
-      changed), or, if searching again found nothing, the stored result is
-      dropped and the host keeps its own parameters.
+      with other Bluetooth devices, say. A stored search result or a value
+      fixed by hand it refuses is asked for once more after this long.
+
+      The stored result refused again: the host is searched now, and what
+      the search finds is used on this connection. It replaces the stored
+      result only if a search on a later connection finds it again (it is
+      kept as the candidate until then); if the stored result is accepted
+      meanwhile, the candidate goes.
+
+      A value fixed by hand refused again: the log says the host refused
+      it, the LED shows red, and the host keeps its own parameters until
+      the next connection, which asks again.
 
 config ZMK_BLE_HOST_LINK_RESTORE_AFTER_FOREIGN_CHANGE_MS
     int "Wait before undoing a change of the link made by someone else (ms)"
@@ -143,17 +168,30 @@ config ZMK_BLE_HOST_LINK_FOREIGN_CHANGE_GIVE_UP_MS
       wants it until the next connection.
 
 config ZMK_BLE_HOST_LINK_DROP_COUNTS_IF_HOST_RETURNS_WITHIN_MS
-    int "A link dropped after a search request counts if the host returns this soon (ms)"
+    int "A link dropped after a request counts if the host returns this soon (ms)"
     default 30000
     help
-      A host that drops the link right after a search request may have
-      disliked the request -- or gone to sleep, or had Bluetooth switched
-      off. A host that disliked it is awake and comes straight back; one
-      that slept does not. So such a drop counts only if the same host
-      connects again within this time (a drop with reason 0x3B --
-      the parameters themselves -- counts at once). A counted drop makes the
-      search skip that kind of request on the host from then on; two
-      counted drops in a row stop the search there until BLE_HOST_LINK_AUTO.
+      A host that drops the link right after a request may have disliked
+      it -- or gone to sleep, or had Bluetooth switched off. A host that
+      disliked it is awake and comes straight back; one that slept does
+      not. So such a drop counts only if the same host connects again
+      within this time (a drop with reason 0x3B -- the parameters
+      themselves -- counts at once; 0x16, this keyboard's own disconnect,
+      never). Values fixed by hand are never blamed.
+
+      It counts only once the same request is blamed on two connections in
+      a row, and not while the link drops by itself (STABLE_LINK_MS). Then
+      a latency above LATENCY_WHILE_SEARCHING_INTERVAL becomes a ceiling,
+      or an interval is skipped from then on with all faster ones, and a
+      stored result they rule out goes. BLE_HOST_LINK_AUTO forgets it all.
+
+config ZMK_BLE_HOST_LINK_STABLE_LINK_MS
+    int "A link up this long shows the host does not drop it by itself (ms)"
+    default 30000
+    help
+      A link that drops with no request to blame, its host straight back,
+      shows the host drops it by itself: drops then say nothing about
+      requests, until a link of that host stays up this long.
 
 config ZMK_BLE_HOST_LINK_APPLY_AFTER_LAST_KEY_MS
     int "Delay between the last change by key and the request to the host (ms)"
@@ -174,6 +212,8 @@ config ZMK_BLE_HOST_LINK_SLOWEST_SETTABLE_BALL_REPORT_MS
     default 16
     help
       16 ms = 62.5 reports a second; slower makes the cursor jerk.
+      Chosen automatically, it is the host interval rounded up to the
+      sensor's 4 ms frame grid: one report per connection event.
 
 config ZMK_BLE_HOST_LINK_TYPED_REPORT_KEY_HOLD_MS
     int "How long each key of a typed report is held, and released (ms)"
@@ -182,6 +222,97 @@ config ZMK_BLE_HOST_LINK_TYPED_REPORT_KEY_HOLD_MS
     help
       Over Bluetooth at least one host link interval, so that the reports
       do not pile up past ZMK's queue on a slow link.
+
+config ZMK_BLE_HOST_LINK_LOG_RSSI
+    bool "Log the host link's signal strength (RSSI)"
+    depends on BT_CTLR_CONN_RSSI
+    default n
+    help
+      With every request, with BLE_HOST_LINK_SHOW, and -- read quietly
+      every 30 s -- the last value before the link goes down: whether a
+      drop came with a weak signal. Needs BT_CTLR_CONN_RSSI=y, which ZMK
+      leaves off: the controller answers the read only with it. A link to
+      a computer across a desk sits around -50..-75 dBm.
+
+config ZMK_BLE_HOST_LINK_LOG_HOST_CONNECTIONS
+    bool "Log the hosts' connections, pairings and the profile selected"
+    default y if LOG
+    imply HWINFO
+    help
+      Lines at INF, only on Bluetooth events: the profile selected and what
+      its host is doing; every host that connects -- whose profile it is,
+      or the address no profile knows -- the encryption it reaches or the
+      error, and why and after how long it goes; pairings, failed pairings
+      and deleted bonds. At start and with BLE_HOST_SHOW, a snapshot: the
+      profiles' addresses against the bonds the Bluetooth stack holds,
+      every connection object with its state, and (with HWINFO) why the
+      keyboard last started.
+
+      For telling where a host that cannot come back stops: before the
+      keyboard sees it at all, at the address, at the encryption, or later.
+
+config ZMK_BLE_HOST_LINK_CHECK_OWN_PAIRING_STATE
+    bool "Check the keyboard's own pairing key pair and address (debugging)"
+    depends on ZMK_BLE_HOST_LINK_LOG_HOST_CONNECTIONS
+    depends on BT_TINYCRYPT_ECC && TINYCRYPT_ECC_DH
+    help
+      For new pairings that all fail at their last step (SMP 0x0b, DHKey
+      check failed) while the hosts paired before keep working. At start,
+      with BLE_HOST_LINK_SHOW and 1.5 s after a failed pairing, a check
+      that the keyboard's private key for Secure Connections still belongs
+      to its public key: the stack computes a DHKey with a test key, and
+      this module the same DHKey from the other side. Logs "Pairing key
+      pair OK" or "... BROKEN". Also the first bytes of the public key with
+      every pairing, and the address the stack gives the controller against
+      the keyboard's identity (WRN when they differ).
+
+      Reaches into the stack's internals; for debugging builds. A pairing
+      that starts during the check's own DHKey -- a quarter of a second --
+      fails once: the stack computes one at a time.
+
+config ZMK_BLE_HOST_LINK_LOG_ADVERTISING_OUT_OF_STEP
+    bool "Log when the keyboard's advertising and ZMK's rule for it part (debugging)"
+    depends on ZMK_BLE_HOST_LINK_LOG_HOST_CONNECTIONS
+    depends on BT_PERIPHERAL && !BT_EXT_ADV
+    default y
+    help
+      ZMK advertises -- calls the hosts -- while the active profile is open
+      or its host is away, and keeps its own note of whether it does,
+      without asking the stack. Its connect and disconnect handlers run on
+      different threads; if they cross, ZMK can stop calling while it
+      believes it calls: no host can connect, the links already up keep
+      working, and a restart clears it.
+
+      Once a second, what ZMK's rule asks for against what the stack's
+      advertiser does. WRN "Advertising out of step for 3 s: ..." when they
+      part for longer than ZMK takes to catch up -- also when the advertiser
+      runs with no connection object waiting for the host that answers --
+      and INF "Advertising back in step ..." when they meet again. The
+      BLE_HOST_LINK_SHOW snapshot gets an "advertising: ..." line.
+
+      Also when the keyboard has advertised, in step, for 15 s and no host
+      has connected -- not even a host of another profile, which comes the
+      moment the keyboard calls: WRN "Advertising for 15 s and no host has
+      connected ..." and the whole BLE_HOST_LINK_SHOW snapshot, once for that
+      stretch. A host simply away or asleep looks the same. Not watched
+      while no profile is paired to a host: none would come by itself.
+
+      Only logs. Reads the stack's internals; for debugging builds.
+
+config ZMK_BLE_HOST_LINK_RESTART_ADVERTISING_WHEN_NO_HOST_ANSWERS
+    bool "Restart the advertising once when no host answers it for 15 s"
+    depends on ZMK_BLE_HOST_LINK_LOG_ADVERTISING_OUT_OF_STEP
+    depends on BT_DEVICE_NAME_DYNAMIC
+    help
+      With the "no host has connected" line above, the advertising is then
+      stopped and started again through ZMK's own call for a new device
+      name -- the same name, so nothing is stored and ZMK's note of its
+      advertising stays right. INF "A host answered N ms after the
+      advertising was restarted" if one comes within 3 s, as a host
+      waiting for the call does: the advertiser was stuck and a restart
+      frees it. One that comes later, up to 15 s, is logged as too late to
+      tell -- someone more likely brought it by hand. WRN "Still no host
+      15 s after ..." if none comes: the fault is below the advertiser.
 
 config ZMK_BLE_HOST_LINK_KEEP_ONLY_ACTIVE_HOST_CONNECTED
     bool "Keep only the active profile's host connected"
@@ -192,66 +323,34 @@ config ZMK_BLE_HOST_LINK_KEEP_ONLY_ACTIVE_HOST_CONNECTED
       schedule and taking air time from the active host and the split link,
       while only the active one gets any input.
 
-      With this on, as with most multi-host mice and keyboards:
-        - once the active profile's host is connected, every other
-          profile's host is disconnected (ZMK stops advertising then, so
-          they do not come back);
-        - while the active profile's host is away -- a profile just
-          selected whose host is not there yet, say -- ZMK advertises to
-          all, and the other profiles' hosts stay connected -- sending them
-          away would only make them come back again and again -- but are
-          asked for the background parameters below, the host of the
-          profile just left too.
+      With this on, as with most multi-host mice and keyboards, once the
+      active profile's host is connected, every other profile's host is
+      disconnected (ZMK stops advertising then, so they do not come back).
+      While the active profile's host is away -- a profile just selected
+      whose host is not there yet, say -- ZMK advertises to all, and the
+      other profiles' hosts stay connected: sending them away would only
+      make them come back again and again.
+
+      A host is sent away only once its link is calm: encrypted, no
+      parameter request of this module waiting for its answer, and up for
+      3 s -- or 15 s after the first try, whatever its state. Cut off in
+      the middle of its encryption, a host is left with a failed encryption
+      on its bond; a disconnect behind a pending parameter change took a
+      whole supervision timeout to get through. A host that takes longer
+      than 1 s to go shows as a WRN.
+
+      Either way, a host that connects while another profile is active is
+      asked once for its own parameters (its stored result, or the secure
+      request); the host of the profile just left keeps what it has.
       Switching to a profile whose host was disconnected takes a
       reconnect, usually 1-3 s.
 
-if ZMK_BLE_HOST_LINK_KEEP_ONLY_ACTIVE_HOST_CONNECTED
-
-config ZMK_BLE_HOST_LINK_BACKGROUND_INTERVAL_MIN
-    int "Background link interval, minimum (1.25 ms units)"
-    range 6 3200
-    default 48
-    help
-      The parameters asked of another profile's host kept connected while
-      the active one is away: as slow as Apple's rules allow, so that it
-      wakes the radio about once in 2 s. 48-60 = 60-75 ms (Apple wants a
-      range 15 ms wide), latency 25, timeout 6 s: 75 ms * 26 = 1.95 s.
-
-config ZMK_BLE_HOST_LINK_BACKGROUND_INTERVAL_MAX
-    int "Background link interval, maximum (1.25 ms units)"
-    range ZMK_BLE_HOST_LINK_BACKGROUND_INTERVAL_MIN 3200
-    default 60
-
-config ZMK_BLE_HOST_LINK_BACKGROUND_LATENCY
-    int "Background link latency (connection events)"
-    range 0 499
-    default 25
-
-config ZMK_BLE_HOST_LINK_BACKGROUND_SUPERVISION_TIMEOUT_MS
-    int "Background link supervision timeout (ms, a multiple of 10)"
-    range 100 32000
-    default 6000
-
-endif # ZMK_BLE_HOST_LINK_KEEP_ONLY_ACTIVE_HOST_CONNECTED
-
 config ZMK_BLE_HOST_LINK_LED_FEEDBACK
-    bool "Count values and host answers out on the RGB LED widget"
+    bool "Show the host's answers on the RGB LED widget"
     depends on RGBLED_WIDGET_BLINK_API
     default y
 
 if ZMK_BLE_HOST_LINK_LED_FEEDBACK
-
-config ZMK_BLE_HOST_LINK_LED_RGB_COUNT_INTERVAL
-    hex "Colour counting out the host interval preset (0xRRGGBB)"
-    default 0x8000FF
-
-config ZMK_BLE_HOST_LINK_LED_RGB_COUNT_LATENCY
-    hex "Colour counting out the host latency preset (0xRRGGBB)"
-    default 0xFF8000
-
-config ZMK_BLE_HOST_LINK_LED_RGB_COUNT_BALL_REPORT
-    hex "Colour counting out the pointer report preset (0xRRGGBB)"
-    default 0xFFFF00
 
 config ZMK_BLE_HOST_LINK_LED_RGB_HOST_ACCEPTED
     hex "The link runs what was asked for (0xRRGGBB)"
@@ -266,11 +365,12 @@ config ZMK_BLE_HOST_LINK_LED_RGB_NOT_CONNECTED_OR_SEARCHING
     default 0x00FFFF
 
 config ZMK_BLE_HOST_LINK_LED_BLINK_ON_MS
-    int "Length of one counting blink (ms)"
+    int "Length of a short blink (ms)"
     range 20 5000
     default 150
     help
-      A count of zero shows as one blink four times this long.
+      A refusal shows as three short blinks; an acceptance, and not
+      connected or searching, as one blink twice this long.
 
 config ZMK_BLE_HOST_LINK_LED_BLINK_OFF_MS
     int "Gap after each blink (ms)"
